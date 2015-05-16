@@ -2,7 +2,7 @@
 ; Change this to 'false' to build a 32-bit binary
 #pragma compile(x64, true)
 #pragma compile(UPX, true)
-' The name of the binary to generate
+; The name of the binary to generate
 #pragma compile(Out, cloudconfig.exe)
 ; The icon to use as the progrma icon (gets jammed into binary)
 #pragma compile(Icon, Bogo-D-Project-Disk-iDisk.ico)
