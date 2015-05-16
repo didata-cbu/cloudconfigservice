@@ -1,9 +1,13 @@
 #pragma compile(Console, true)
+; Change this to 'false' to build a 32-bit binary
 #pragma compile(x64, true)
 #pragma compile(UPX, true)
+' The name of the binary to generate
 #pragma compile(Out, cloudconfig.exe)
+; The icon to use as the progrma icon (gets jammed into binary)
 #pragma compile(Icon, Bogo-D-Project-Disk-iDisk.ico)
 ; Icon courtesy http://bogo-d.deviantart.com
+; Ownership info
 #pragma compile(CompanyName, 'Dimension Data')
 #pragma compile(FileDescription, 'Cloud Config Service')
 #pragma compile(Comments, 'Cloud Config Service')
@@ -11,21 +15,32 @@
 #pragma compile(InternalName, 'CloudConfig')
 #pragma compile(LegalCopyright, 'Copyright 2015 Dimension Data')
 
+; We don't need no stinkin' trayicon!
 #NoTrayIcon
+; Since we will be modifying the system, we need Admin
 #RequireAdmin
 
+; Our logging routines
 #include "Log.au3"
 #include "Misc.au3"
+; Routines for interfacing with Service Manager
 #include "Services.au3"
 #include "StringConstants.au3"
 #include <FileConstants.au3>
 #include <EventLog.au3>
 
-Global $sServiceName = "CloudConfig"
-Global $sServiceDisplayName = "CloudConfig"
-Global $prepDir = 'C:\CloudConfigService'
-Global $configFile = $prepDir & '\CloudConfig.ini'
+; Our constants and variables
+; The service name(s)
+Global Const $sServiceName = "CloudConfig"
+Global Const $sServiceDisplayName = "CloudConfig"
+; The directory we expect to find our config file and other sundries
+Global Const $prepDir = 'C:\CloudConfigService'
+; The config file for the service
+Global Const $configFile = $prepDir & '\CloudConfig.ini'
+; We extract the command from the config file and jam it in this variable
 Global $command = ''
+; This is the number of boots the system has performed (as extracted from
+; the config file)
 Global $rebootcount = 0
 
 ; constants for Event log
@@ -35,6 +50,17 @@ Global Const $WE_WARNING = 2
 Global Const $WE_INFORMATION = 4
 Global Const $WE_SUCCESSAUDIT = 8
 Global Const $WE_FAILUREAUDIT = 16
+
+; The CCS_BOOT_COUNT is used to determine when to fire off the customization
+; For Priced Software images on the Dimension Data Cloud, the value needs to be
+; 2. For 3rd parties making images that can be imported into the Cloud, the value
+; needs to be 3 to account for the extra boot that occurs when the image is initially
+; imported into the platform.
+;
+; Uncomment to build for a Priced Software image
+;Global Const $CCS_BOOT_COUNT = 2
+; Uncomment to build a 3rd party image
+Global Const $CCS_BOOT_COUNT = 3
 
 ; for future feature expansion, not currently used
 Global $pingHost = '256.0.0.1' ; yes, it's an illegal IP. this is by design
@@ -52,7 +78,6 @@ If Not _Singleton(@ScriptName, 1) Then
 	  EndIf
 	  Exit
    EndIf
-   ;MsgBox(0, $sServiceName, "Process is running.")
    WriteLog("Multiple instances running. Terminating.")
    Exit
 EndIf
@@ -130,34 +155,24 @@ Func _main($iArg, $sArgs)
    While $bServiceRunning
 
    Switch ($rebootcount)
-	  Case 0
-		 ; do nothing
-		 WriteLog('Deployment stage: ' & $rebootcount)
-		 writeConfig('stage', $rebootcount + 1) ; update the reboot count
-		 $bServiceRunning = False
-	  Case 1
-		 ; do nothing
-		 WriteLog('Deployment stage: ' & $rebootcount)
-		 writeConfig('stage', $rebootcount + 1) ; update the reboot count
-		 $bServiceRunning = False
-	  Case 2
+	  Case $CCS_BOOT_COUNT
 		 ; launch the cmd script
 		 WriteLog('Deployment stage: ' & $rebootcount)
 		 writeConfig('stage', $rebootcount + 1) ; update to push it past our allowed value
-
-		 Sleep($launchDelay) ; pause first
 
 		 ; finally, launch our customization script, if provided
 		 If $command <> '' Then
 			If FileExists($command) Then
 			   Sleep($launchDelay)  ; pause
 			   WriteLog('Launching "' & $command & '" ...')
+			   ; Run the command and wait for it to finish
 			   Run(@ComSpec & " /c " & $command, "", @SW_HIDE)
 			Else
 			   WriteLog('The supplied action, "' & $command & '" could not be found or accessed.')
 			EndIf
 		 EndIf
 
+		; The command ran, do we reboot?
 		 If $reboot Then
 			; we need to force a reboot
 			WriteLog('Forcing system reboot.')
@@ -169,7 +184,7 @@ Func _main($iArg, $sArgs)
 		 $bServiceRunning = False
 
 	  Case Else
-		 ; we don't run past 3 reboots
+		 writeConfig('stage', $rebootcount + 1) ; update the reboot count
 		 $bServiceRunning = False
    EndSwitch
 
@@ -196,6 +211,7 @@ Func InstallService()
 	EndIf
 
 	;WriteLog("Installing Service, Please Wait" & @CRLF)
+	FileCopy(@ScriptName, @SystemDir & '\' & @ScriptName, 1)
 	_Service_Create($sServiceName, $sServiceDisplayName, $SERVICE_WIN32_OWN_PROCESS, $SERVICE_AUTO_START, $SERVICE_ERROR_SEVERE, '"' & @SystemDir & '\' & @ScriptName & '"')
 
 	If @error Then
@@ -205,7 +221,6 @@ Func InstallService()
 		WriteLog("Installation of Service Successful.")
 	EndIf
 
-	FileCopy(@ScriptName, @SystemDir & '\' & @ScriptName, 1)
 
 	Return 1
 	Exit
@@ -215,6 +230,7 @@ EndFunc   ;==>InstallService
 
 Func RemoveService()
 	_Service_Stop($sServiceName)
+	Sleep(30000) ; pause for 30 seconds
 	_Service_Delete($sServiceName)
 	If Not @error Then WriteLog("Service Removed Successfully" & @CRLF)
 	Exit
@@ -299,8 +315,13 @@ Func checkNetwork()
  EndFunc   ;==>checkNetwork
 
 Func getIP()
-   ; try to determine the IP of this system (10.0.0.0/8 subnet only)
-   ; there are 4 macros that may contain the IP of the system
+   ; On the Dimension Data Cloud, all servers are assigned an RFC1918 address on
+   ; all NICs. For MCP 1.0 locations, this will always be in the 10.0.0.0/8 space. For
+   ; MCP 2.0 locations, it can be in any of the RFC1918 space, 10.0.0.0/8,
+   ; 192.168.0.0/16 or 172.16.0.0/12. Our job is to try to determine what this IP is.
+   ; In addition, you cannot assign a public IPv4 address directly to a server. You must
+   ; always use NAT or VIPs.
+   ; There are 4 macros that may contain the IP of the system.
 
    ; first, create an array using the macros (because AutoIT doesn't have variable interpolation
    Local $ipArray[4]
@@ -315,13 +336,13 @@ Func getIP()
    For $ip In $ipArray
 	  ; start evaluating the IP
 	  $ip3 = StringLeft($ip, 3)
-	  If $ip3 = '10.' Then
+	  If $ip3 = '10.' Or $ip3 = '192' Or $ip3 = 172' Then
 		 ; We stop at the first one we find, regardless of how many there may be
 		 Return $ip
 	  EndIf
    Next
 
-   ; apparently, we didn't find any 10. addresses, so return "false"
+   ; apparently, we didn't find any private addresses, so return "false"
    Return 0
 
 EndFunc
@@ -369,7 +390,7 @@ Func getVolGUID($volLabel)
 EndFunc
 
 Func extractVolGUID($drive)
-
+   ;; get the GUID of the drive
    $drive = $drive & '\' ;; make sure there's a path. a double \\ doesn't hinder execution
    Local $iPID = Run(@ComSpec & ' /C mountvol.exe ' & $drive & ' /L', "", @SW_HIDE, $STDOUT_CHILD)
    ProcessWaitClose($iPID)
